@@ -1,93 +1,60 @@
 package dev.hjih.trapbot;
 
-import android.annotation.SuppressLint;
-import android.content.Context;
-import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
-import android.util.Log;
-import android.webkit.JavascriptInterface;
-import android.webkit.WebResourceRequest;
-import android.webkit.WebResourceResponse;
-import android.webkit.WebSettings;
-import android.webkit.WebView;
-import android.webkit.WebViewClient;
 
+import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-import java.io.ByteArrayInputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.util.HashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
 
-/** Шахматный движок (JS из Trap_Chess.html) в скрытом WebView, внутри Web Worker. */
+/**
+ * Шахматный движок «Ловушки v3» — чистая Java, без WebView и JS.
+ * Интерфейс прежний: think(...) → колбэк на главном потоке с JSON
+ * (ff, fr, tf, tr, pr, info | none, over | error).
+ */
 final class EngineBridge {
     interface CB { void done(JSONObject o); }
 
-    private static final String HOST = "appassets.androidplatform.net";
-
-    private final WebView wv;
+    private final TrapEngine eng;
+    private final ExecutorService ex;
     private final Handler h = new Handler(Looper.getMainLooper());
     private CB cb;
-    private boolean loaded;
-    private String queued;
     private Runnable wd;
     private int seq;
 
-    @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
-    EngineBridge(final Context c) {
-        wv = new WebView(c);
-        WebSettings s = wv.getSettings();
-        s.setJavaScriptEnabled(true);
-        s.setAllowFileAccess(false);
-        wv.addJavascriptInterface(new Bridge(), "Android");
-        wv.setWebViewClient(new WebViewClient() {
-            @Override public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest r) {
-                return asset(c, r.getUrl());
-            }
-            @Override public void onPageFinished(WebView v, String u) {
-                loaded = true;
-                if (queued != null) { String q = queued; queued = null; run(q); }
+    EngineBridge(android.content.Context c) {
+        int cores = Runtime.getRuntime().availableProcessors();
+        eng = new TrapEngine(Math.max(1, Math.min(6, cores)));
+        ex = Executors.newSingleThreadExecutor(new ThreadFactory() {
+            @Override public Thread newThread(Runnable r) {
+                Thread t = new Thread(r, "trap-engine");
+                t.setDaemon(true);
+                return t;
             }
         });
-        wv.loadUrl("https://" + HOST + "/index.html");
     }
 
-    private static WebResourceResponse asset(Context c, Uri u) {
-        if (!HOST.equals(u.getHost()))
-            return new WebResourceResponse("text/plain", "utf-8", 403, "Blocked",
-                    new HashMap<String, String>(), new ByteArrayInputStream(new byte[0]));
-        String p = u.getPath();
-        if (p == null || p.equals("/")) p = "/index.html";
-        try {
-            InputStream in = c.getAssets().open(p.substring(1));
-            String mime = p.endsWith(".html") ? "text/html" : p.endsWith(".js") ? "application/javascript" : "text/plain";
-            return new WebResourceResponse(mime, "utf-8", in);
-        } catch (IOException e) {
-            return new WebResourceResponse("text/plain", "utf-8", 404, "Not Found",
-                    new HashMap<String, String>(), new ByteArrayInputStream(new byte[0]));
-        }
-    }
-
-    void think(String fen, int depth, double sec, int cun, boolean adapt, CB callback) {
+    void think(final String fen, final int depth, final double sec, final int cun, final boolean adapt,
+               JSONArray ban, CB callback) {
         cb = callback;
         final int id = ++seq;
-        JSONObject o = new JSONObject();
-        try {
-            o.put("id", id);
-            o.put("fen", fen);
-            o.put("depth", depth);
-            o.put("ms", Math.round(sec * 1000));
-            o.put("cun", cun);
-            o.put("adapt", adapt);
-        } catch (JSONException ignored) { }
+        final int[][] banList = new int[ban == null ? 0 : ban.length()][];
+        for (int i = 0; i < banList.length; i++) {
+            JSONArray a = ban.optJSONArray(i);
+            banList[i] = a == null || a.length() < 4 ? new int[]{-1, -1, -1, -1}
+                    : new int[]{a.optInt(0), a.optInt(1), a.optInt(2), a.optInt(3)};
+        }
         h.removeCallbacks(wd);
         wd = new Runnable() {
             @Override public void run() {
                 if (cb != null && id == seq) {
                     CB c2 = cb;
                     cb = null;
+                    eng.cancel();
                     JSONObject e = new JSONObject();
                     try { e.put("error", "движок не ответил (таймаут)"); } catch (JSONException ignored) { }
                     c2.done(e);
@@ -95,31 +62,47 @@ final class EngineBridge {
             }
         };
         h.postDelayed(wd, Math.round(sec * 1000) + 12000);
-        String js = "run(" + o + ")";
-        if (!loaded) queued = js; else run(js);
+        ex.execute(new Runnable() {
+            @Override public void run() {
+                TrapEngine.Result r;
+                try {
+                    r = eng.handle(fen, depth, Math.round(sec * 1000), cun, adapt, banList);
+                } catch (Throwable t) {
+                    r = new TrapEngine.Result();
+                    r.error = String.valueOf(t);
+                }
+                final JSONObject o = toJson(r);
+                h.post(new Runnable() {
+                    @Override public void run() {
+                        if (id != seq) return;
+                        h.removeCallbacks(wd);
+                        CB c = cb;
+                        cb = null;
+                        if (c != null) c.done(o);
+                    }
+                });
+            }
+        });
     }
 
-    private void run(String js) { wv.evaluateJavascript(js, null); }
+    private static JSONObject toJson(TrapEngine.Result r) {
+        JSONObject o = new JSONObject();
+        try {
+            if (r.error != null) o.put("error", r.error);
+            else if (r.none) { o.put("none", true); o.put("over", r.over == null ? "Нет ходов" : r.over); }
+            else {
+                o.put("ff", r.ff).put("fr", r.fr).put("tf", r.tf).put("tr", r.tr).put("pr", r.pr);
+                o.put("info", r.info);
+            }
+        } catch (JSONException ignored) { }
+        return o;
+    }
 
     void destroy() {
         h.removeCallbacks(wd);
         cb = null;
-        try { wv.destroy(); } catch (Exception ignored) { }
-    }
-
-    final class Bridge {
-        @JavascriptInterface public void onResult(final String s) {
-            h.post(new Runnable() {
-                @Override public void run() {
-                    h.removeCallbacks(wd);
-                    JSONObject o = null;
-                    try { o = new JSONObject(s); } catch (Exception ignored) { }
-                    CB c = cb;
-                    cb = null;
-                    if (c != null && o != null) c.done(o);
-                }
-            });
-        }
-        @JavascriptInterface public void onLog(String s) { Log.d("TrapBot", s); }
+        seq++;
+        eng.shutdown();
+        ex.shutdownNow();
     }
 }

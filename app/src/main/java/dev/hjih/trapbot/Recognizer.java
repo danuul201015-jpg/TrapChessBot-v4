@@ -304,6 +304,7 @@ final class Recognizer {
         float[] st = new float[2];
         int unk = 0, wk = 0, bk = 0;
         boolean badPawn = false;
+        float[][][] ts = new float[8][8][6]; // лучшее совпадение с каждым типом фигуры
         for (int row = 0; row < 8; row++) for (int col = 0; col < 8; col++) {
             boolean[] m = sil(f, col, row, st);
             char ch;
@@ -313,15 +314,35 @@ final class Recognizer {
                 int c = Math.abs(st[1] - t.lum0) <= Math.abs(st[1] - t.lum1) ? 0 : 1;
                 int bt = -1;
                 float bs = 0;
+                int rk0 = wb ? 7 - row : row, fl0 = wb ? col : 7 - col;
                 for (int ty = 0; ty < 6; ty++) for (boolean[] tm : t.list[c][ty]) {
                     float s = iou(m, tm);
+                    if (s > ts[rk0][fl0][ty]) ts[rk0][fl0][ty] = s;
                     if (s > bs) { bs = s; bt = ty; }
                 }
-                if (bt < 0 || bs < 0.45f) { ch = '?'; unk++; }
+                if (bt < 0 || bs < 0.40f) { ch = '?'; unk++; }
                 else { ch = ORDER.charAt(bt); if (c == 1) ch = Character.toLowerCase(ch); }
             }
             int file = wb ? col : 7 - col, rank = wb ? 7 - row : row;
             r.b[rank][file] = ch;
+        }
+        // Король ровно один у каждой стороны: силуэты короля и ферзя похожи, поэтому среди клеток,
+        // распознанных как K/Q, королём делаем ту, что больше похожа на короля, остальные — ферзи.
+        for (int c = 0; c < 2; c++) {
+            char K = c == 0 ? 'K' : 'k', Q = c == 0 ? 'Q' : 'q';
+            int br = -1, bf = -1;
+            float bd = -9;
+            for (int rk = 0; rk < 8; rk++) for (int fl = 0; fl < 8; fl++) {
+                if (r.b[rk][fl] != K && r.b[rk][fl] != Q) continue;
+                float d = ts[rk][fl][5] - ts[rk][fl][4];
+                if (d > bd) { bd = d; br = rk; bf = fl; }
+            }
+            if (br < 0) continue;
+            for (int rk = 0; rk < 8; rk++) for (int fl = 0; fl < 8; fl++)
+                if (r.b[rk][fl] == K || r.b[rk][fl] == Q) r.b[rk][fl] = (rk == br && fl == bf) ? K : Q;
+        }
+        for (int rank = 0; rank < 8; rank++) for (int file = 0; file < 8; file++) {
+            char ch = r.b[rank][file];
             if (ch == 'K') wk++;
             if (ch == 'k') bk++;
             if ((ch == 'P' || ch == 'p') && (rank == 0 || rank == 7)) badPawn = true;

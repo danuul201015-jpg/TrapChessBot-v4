@@ -52,6 +52,11 @@ public class BotService extends AccessibilityService {
     private int fails;
     private boolean retryNext;
     private TextView sideBtn;
+    private final ArrayList<int[]> banned = new ArrayList<>();
+    private String banKey;
+    private int[] lastTry;
+    private boolean sessionActed;
+    private long lastErrToast;
 
     @Override protected void onServiceConnected() {
         inst = this;
@@ -86,6 +91,9 @@ public class BotService extends AccessibilityService {
         blocked = null;
         prevKey = null;
         rights = 15;
+        sessionActed = false;
+        banned.clear();
+        banKey = null;
         wb = Prefs.white(this);
         tpl = Recognizer.Templates.parse(Prefs.tpl(this));
         int[] b = Prefs.board(this);
@@ -375,7 +383,7 @@ public class BotService extends AccessibilityService {
         autoOn = on;
         applyFloatLook(false);
         h.removeCallbacks(tick);
-        if (on) { prevKey = null; fails = 0; retryNext = false; h.postDelayed(tick, 100); }
+        if (on) { prevKey = null; fails = 0; retryNext = false; sessionActed = false; banned.clear(); banKey = null; h.postDelayed(tick, 100); }
         toast(on ? "Авто-режим включён" : "Авто-режим выключен");
     }
 
@@ -406,10 +414,29 @@ public class BotService extends AccessibilityService {
         final String oldKey = r.key;
         final char[][] bd = r.b;
         String fen = r.key + " " + (wb ? "w" : "b") + " " + Recognizer.castle(rights) + " - 0 1";
-        eng.think(fen, Prefs.depth(this), Prefs.timeSec(this), Prefs.cun(this), Prefs.adapt(this), new EngineBridge.CB() {
+        if (!oldKey.equals(banKey)) { banned.clear(); banKey = oldKey; }
+        org.json.JSONArray ban = new org.json.JSONArray();
+        for (int[] bm : banned) {
+            org.json.JSONArray a = new org.json.JSONArray();
+            for (int v : bm) a.put(v);
+            ban.put(a);
+        }
+        eng.think(fen, Prefs.depth(this), Prefs.timeSec(this), Prefs.cun(this), Prefs.adapt(this), ban, new EngineBridge.CB() {
             @Override public void done(JSONObject o) {
                 if (!running) { busy = false; return; }
-                if (o.has("error")) { toast("Движок: " + o.optString("error")); busy = false; setAuto(false); return; }
+                if (o.has("error")) {
+                    String er = o.optString("error");
+                    busy = false;
+                    prevKey = null;
+                    if (er.startsWith("Позиция")) { // плохое распознавание — просто ждём следующий кадр
+                        long now = System.currentTimeMillis();
+                        if (now - lastErrToast > 4000) { lastErrToast = now; toast(er); }
+                        return;
+                    }
+                    toast("Движок: " + er);
+                    setAuto(false);
+                    return;
+                }
                 if (o.optBoolean("none")) {
                     toast(o.optString("over", "Нет ходов"));
                     blocked = oldKey;
@@ -422,7 +449,9 @@ public class BotService extends AccessibilityService {
                 if (!info.isEmpty()) toast(info);
                 final String expKey = Recognizer.place(Recognizer.apply(bd, ff, fr, tf, tr, pr));
                 final boolean retry = retryNext;
-                doMove(ff, fr, tf, tr, pr > 0, retry, new Runnable() {
+                lastTry = new int[]{ff, fr, tf, tr};
+                int mode = Prefs.drag(BotService.this) ? 2 : (fails == 0 ? 0 : fails == 1 ? 1 : (fails % 2 == 0 ? 2 : 0));
+                doMove(ff, fr, tf, tr, pr > 0, mode, new Runnable() {
                     @Override public void run() { verify(oldKey, expKey, 0, null); }
                 });
             }
@@ -439,6 +468,7 @@ public class BotService extends AccessibilityService {
                 if (k != null && !k.equals(oldKey) && k.equals(lastKey)) {
                     fails = 0;
                     retryNext = false;
+                    sessionActed = true;
                     blocked = k.equals(expKey) ? expKey : null; // иначе соперник уже ответил — снова наш ход
                     prevKey = null;
                     busy = false;
@@ -447,13 +477,21 @@ public class BotService extends AccessibilityService {
                 if (n >= 20) { // ~2.5 с без изменений: нажатие не сработало
                     fails++;
                     prevKey = null;
-                    if (fails >= 3) {
+                    if (!sessionActed && !Recognizer.START.equals(oldKey) && fails == 1) {
+                        // партия уже шла, когда бот включили: скорее всего сейчас ход соперника
+                        fails = 0;
+                        retryNext = false;
+                        blocked = oldKey;
+                        toast("Похоже, ход соперника — жду его хода (кнопка «1» — ходить сразу)");
+                    } else if (fails >= 6) {
                         fails = 0;
                         retryNext = false;
                         blocked = oldKey;
                         toast("Ход не получается. Проверьте рамку/сторону или нажмите «1»");
                     } else {
-                        retryNext = true; // следующая попытка начнётся с другой последовательности нажатий
+                        retryNext = true;
+                        // со второй неудачи этот ход считаем невозможным и просим движок выбрать другой
+                        if (fails >= 2 && lastTry != null) banned.add(lastTry);
                     }
                     busy = false;
                     return;
@@ -471,6 +509,9 @@ public class BotService extends AccessibilityService {
         rights = 15;
         fails = 0;
         retryNext = false;
+        sessionActed = false;
+        banned.clear();
+        banKey = null;
         if (sideBtn != null) sideBtn.setText(wb ? "Б" : "Ч");
         toast(wb ? "Играю белыми (белые внизу)" : "Играю чёрными (чёрные внизу)");
     }
@@ -479,19 +520,25 @@ public class BotService extends AccessibilityService {
 
     private PointF center(int file, int rank) {
         int col = wb ? file : 7 - file, row = wb ? 7 - rank : rank;
-        return new PointF(board.left + (col + .5f) * board.width() / 8f, board.top + (row + .5f) * board.height() / 8f);
+        float cell = board.height() / 8f;
+        float x = board.left + (col + .5f) * board.width() / 8f;
+        float y = board.top + (row + .5f) * cell;
+        if (row == 7) y -= 0.12f * cell;                 // нижний ряд: чуть выше центра клетки
+        y = Math.min(y, sh - dp(28));                    // не попадать в зону системных жестов внизу
+        y = Math.max(y, dp(8));
+        return new PointF(x, y);
     }
 
-    private void doMove(int ff, int fr, int tf, int tr, final boolean promo, boolean retry, final Runnable done) {
+    private void doMove(int ff, int fr, int tf, int tr, final boolean promo, int mode, final Runnable done) {
         final PointF a = center(ff, fr), b = center(tf, tr);
         final Runnable fin = new Runnable() {
             @Override public void run() {
-                if (promo) h.postDelayed(new Runnable() { @Override public void run() { tap(b.x, b.y, done); } }, 250); // ферзь
+                if (promo) h.postDelayed(new Runnable() { @Override public void run() { tap(b.x, b.y, done); } }, 350); // ферзь
                 else done.run();
             }
         };
-        if (Prefs.drag(this)) swipe(a, b, fin);
-        else if (retry) {
+        if (mode == 2) swipe(a, b, fin);
+        else if (mode == 1) {
             // прошлая попытка могла оставить фигуру выбранной: сперва «клетка назначения», потом заново
             tap(b.x, b.y, new Runnable() { @Override public void run() {
                 tap(a.x, a.y, new Runnable() { @Override public void run() { tap(b.x, b.y, fin); } });
@@ -503,7 +550,7 @@ public class BotService extends AccessibilityService {
     private void tap(float x, float y, Runnable then) {
         Path p = new Path();
         p.moveTo(x, y);
-        gesture(new GestureDescription.StrokeDescription(p, 0, 30), then);
+        gesture(new GestureDescription.StrokeDescription(p, 0, 50), then);
     }
 
     private void swipe(PointF a, PointF b, Runnable then) {
