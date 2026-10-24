@@ -44,7 +44,7 @@ public class BotService extends AccessibilityService {
     private Recognizer.Templates tpl;
     private boolean running, autoOn, busy, wb = true;
     private String blocked, prevKey;
-    private int rights = 15;
+    private final Tracker tr = new Tracker();
     private int sw, sh;
     private final ArrayList<GradientDrawable> floatBg = new ArrayList<>();
     private final ArrayList<TextView> floatTv = new ArrayList<>();
@@ -90,7 +90,7 @@ public class BotService extends AccessibilityService {
         busy = false;
         blocked = null;
         prevKey = null;
-        rights = 15;
+        tr.invalidate();
         sessionActed = false;
         banned.clear();
         banKey = null;
@@ -389,12 +389,14 @@ public class BotService extends AccessibilityService {
 
     private void autoStep() {
         Recognizer.Res r = read();
-        if (r == null || !r.ok) { prevKey = null; return; }
-        if (r.key.equals(Recognizer.START)) { rights = 15; blocked = wb ? null : r.key; }
-        boolean stable = r.key.equals(prevKey);
-        prevKey = r.key;
+        if (r == null || !r.occOk) { prevKey = null; return; }
+        if (r.occKey.equals(Recognizer.START_OCC)) blocked = wb ? null : r.occKey;
+        boolean stable = r.occKey.equals(prevKey);
+        prevKey = r.occKey;
         if (!stable) return;                  // фигуры ещё двигаются
-        if (r.key.equals(blocked)) return;    // ждём хода соперника
+        if (r.occKey.equals(blocked)) return; // ждём хода соперника
+        if (!tr.sync(r, wb)) return;          // позицию пока не удалось определить
+        if (tr.side() != (wb ? 0 : 1)) return; // по партии сейчас ход соперника
         act(r);
     }
 
@@ -403,17 +405,14 @@ public class BotService extends AccessibilityService {
         if (!ready()) return;
         Recognizer.Res r = read();
         if (r == null) { toast("Не удалось прочитать экран"); return; }
-        if (!r.ok) { toast("Доска не распознана: " + r.msg); return; }
-        if (r.key.equals(Recognizer.START)) rights = 15;
+        if (!r.occOk || !tr.sync(r, wb)) { toast("Доска не распознана: " + (r.msg.isEmpty() ? "позиция не сходится" : r.msg)); return; }
         act(r);
     }
 
     private void act(final Recognizer.Res r) {
         busy = true;
-        rights &= Recognizer.possibleRights(r.b);
-        final String oldKey = r.key;
-        final char[][] bd = r.b;
-        String fen = r.key + " " + (wb ? "w" : "b") + " " + Recognizer.castle(rights) + " - 0 1";
+        final String oldKey = r.occKey;
+        String fen = tr.fen(wb);
         if (!oldKey.equals(banKey)) { banned.clear(); banKey = oldKey; }
         org.json.JSONArray ban = new org.json.JSONArray();
         for (int[] bm : banned) {
@@ -428,7 +427,8 @@ public class BotService extends AccessibilityService {
                     String er = o.optString("error");
                     busy = false;
                     prevKey = null;
-                    if (er.startsWith("Позиция")) { // плохое распознавание — просто ждём следующий кадр
+                    if (er.startsWith("Позиция")) { // плохое распознавание — пересоберём позицию заново
+                        tr.invalidate();
                         long now = System.currentTimeMillis();
                         if (now - lastErrToast > 4000) { lastErrToast = now; toast(er); }
                         return;
@@ -444,32 +444,34 @@ public class BotService extends AccessibilityService {
                     setAuto(false);
                     return;
                 }
-                int ff = o.optInt("ff"), fr = o.optInt("fr"), tf = o.optInt("tf"), tr = o.optInt("tr"), pr = o.optInt("pr");
+                int ff = o.optInt("ff"), fr = o.optInt("fr"), tf = o.optInt("tf"), trk = o.optInt("tr"), pr = o.optInt("pr");
                 String info = o.optString("info", "");
                 if (!info.isEmpty()) toast(info);
-                final String expKey = Recognizer.place(Recognizer.apply(bd, ff, fr, tf, tr, pr));
+                final String expKey = tr.occAfter(ff, fr, tf, trk, pr);
+                final int mFf = ff, mFr = fr, mTf = tf, mTr = trk, mPr = pr;
                 final boolean retry = retryNext;
-                lastTry = new int[]{ff, fr, tf, tr};
+                lastTry = new int[]{ff, fr, tf, trk};
                 int mode = Prefs.drag(BotService.this) ? 2 : (fails == 0 ? 0 : fails == 1 ? 1 : (fails % 2 == 0 ? 2 : 0));
-                doMove(ff, fr, tf, tr, pr > 0, mode, new Runnable() {
-                    @Override public void run() { verify(oldKey, expKey, 0, null); }
+                doMove(ff, fr, tf, trk, pr > 0, mode, new Runnable() {
+                    @Override public void run() { verify(oldKey, expKey, new int[]{mFf, mFr, mTf, mTr, mPr}, 0, null); }
                 });
             }
         });
     }
 
     /** ждём, пока ход появится на доске (приложение может отрисовать его с задержкой); при неудаче — повторяем */
-    private void verify(final String oldKey, final String expKey, final int n, final String lastKey) {
+    private void verify(final String oldKey, final String expKey, final int[] mv, final int n, final String lastKey) {
         h.postDelayed(new Runnable() {
             @Override public void run() {
                 if (!running) { busy = false; return; }
                 Recognizer.Res r2 = read();
-                String k = (r2 != null && r2.ok) ? r2.key : null;
+                String k = (r2 != null && r2.occOk) ? r2.occKey : null;
                 if (k != null && !k.equals(oldKey) && k.equals(lastKey)) {
                     fails = 0;
                     retryNext = false;
                     sessionActed = true;
-                    blocked = k.equals(expKey) ? expKey : null; // иначе соперник уже ответил — снова наш ход
+                    if (k.equals(expKey)) { tr.commit(mv[0], mv[1], mv[2], mv[3], mv[4]); blocked = expKey; }
+                    else blocked = null; // иначе соперник уже ответил — позицию догонит трекер
                     prevKey = null;
                     busy = false;
                     return;
@@ -477,7 +479,7 @@ public class BotService extends AccessibilityService {
                 if (n >= 20) { // ~2.5 с без изменений: нажатие не сработало
                     fails++;
                     prevKey = null;
-                    if (!sessionActed && !Recognizer.START.equals(oldKey) && fails == 1) {
+                    if (!sessionActed && !Recognizer.START_OCC.equals(oldKey) && fails == 1) {
                         // партия уже шла, когда бот включили: скорее всего сейчас ход соперника
                         fails = 0;
                         retryNext = false;
@@ -496,7 +498,7 @@ public class BotService extends AccessibilityService {
                     busy = false;
                     return;
                 }
-                verify(oldKey, expKey, n + 1, k);
+                verify(oldKey, expKey, mv, n + 1, k);
             }
         }, 120);
     }
@@ -506,7 +508,7 @@ public class BotService extends AccessibilityService {
         Prefs.sp(this).edit().putBoolean("white", wb).apply();
         blocked = null;
         prevKey = null;
-        rights = 15;
+        tr.invalidate();
         fails = 0;
         retryNext = false;
         sessionActed = false;

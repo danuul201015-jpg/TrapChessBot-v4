@@ -411,6 +411,22 @@ final class Pos {
         return t;
     }
 
+    /** подвижность фигуры: сколько полей она достаёт (свои фигуры не считаются); slide — скользящая */
+    private int mob(int q, int[] dirs, boolean slide, boolean w) {
+        int n = 0;
+        for (int d : dirs) {
+            int t = q + d;
+            while ((t & 0x88) == 0) {
+                int x = b[t];
+                if (x == 0) n++;
+                else { if (((x & 8) == 0) != w) n++; break; }
+                if (!slide) break;
+                t += d;
+            }
+        }
+        return n;
+    }
+
     int evaluate() {
         double s = 0;
         int np = 0, wb = 0, bb = 0, nr = 0, npw = 0;
@@ -428,10 +444,10 @@ final class Pos {
                 if (w) { wpf[f]++; if ((q >> 4) < wmin[f]) wmin[f] = q >> 4; }
                 else { bpf[f]++; if ((q >> 4) > bmax[f]) bmax[f] = q >> 4; }
                 if (npw < 20) pq[npw++] = q;
-            } else if (pt == 2) { v += (c - 3) * 9; np += 320; }
-            else if (pt == 3) { v += (c - 3) * 5; np += 330; if (w) wb++; else bb++; }
-            else if (pt == 4) { np += 500; if (rel == 6) v += 14; if (nr < 10) rk[nr++] = q; }
-            else if (pt == 5) np += 900;
+            } else if (pt == 2) { v += (c - 3) * 9 + (mob(q, KN, false, w) - 4) * 4; np += 320; }
+            else if (pt == 3) { v += (c - 3) * 5 + (mob(q, BD, true, w) - 6) * 3; np += 330; if (w) wb++; else bb++; }
+            else if (pt == 4) { v += (mob(q, RD, true, w) - 7) * 2; np += 500; if (rel == 6) v += 14; if (nr < 10) rk[nr++] = q; }
+            else if (pt == 5) { v += Math.min(14, mob(q, KG, true, w)) - 7; np += 900; }
             else v = 0;
             s += w ? v : -v;
         }

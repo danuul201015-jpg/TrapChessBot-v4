@@ -69,8 +69,20 @@ final class Recognizer {
         }
     }
 
+    /** занятость клеток в начальной позиции (0 — пусто, 1 — белая, 2 — чёрная), индекс rank*8+file */
+    static final String START_OCC;
+    static {
+        char[] c = new char[64];
+        for (int r = 0; r < 8; r++) for (int f = 0; f < 8; f++)
+            c[r * 8 + f] = r < 2 ? '1' : r > 5 ? '2' : '0';
+        START_OCC = new String(c);
+    }
+
     static final class Res {
         final char[][] b = new char[8][8]; // b[rank][file], rank 0 = первая горизонталь белых
+        /** только «пусто / белая / чёрная» — читается надёжнее, чем тип фигуры (король и ферзь похожи) */
+        String occKey = "";
+        boolean occOk;
         boolean ok;
         String msg = "";
         String key = "";
@@ -305,13 +317,17 @@ final class Recognizer {
         int unk = 0, wk = 0, bk = 0;
         boolean badPawn = false;
         float[][][] ts = new float[8][8][6]; // лучшее совпадение с каждым типом фигуры
+        char[] occ = new char[64];
         for (int row = 0; row < 8; row++) for (int col = 0; col < 8; col++) {
             boolean[] m = sil(f, col, row, st);
             char ch;
+            int orow = wb ? 7 - row : row, ocol = wb ? col : 7 - col;
             if (st[0] < t.emptyThr) {
                 ch = ' ';
+                occ[orow * 8 + ocol] = '0';
             } else {
                 int c = Math.abs(st[1] - t.lum0) <= Math.abs(st[1] - t.lum1) ? 0 : 1;
+                occ[orow * 8 + ocol] = c == 0 ? '1' : '2';
                 int bt = -1;
                 float bs = 0;
                 int rk0 = wb ? 7 - row : row, fl0 = wb ? col : 7 - col;
@@ -347,6 +363,8 @@ final class Recognizer {
             if (ch == 'k') bk++;
             if ((ch == 'P' || ch == 'p') && (rank == 0 || rank == 7)) badPawn = true;
         }
+        r.occKey = new String(occ);
+        r.occOk = true;
         r.key = place(r.b);
         r.ok = unk == 0 && wk == 1 && bk == 1 && !badPawn;
         if (!r.ok) r.msg = unk > 0 ? "Не распознано клеток: " + unk : "Позиция выглядит неверно (короли/пешки)";
