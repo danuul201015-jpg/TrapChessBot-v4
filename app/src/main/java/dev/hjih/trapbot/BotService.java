@@ -46,6 +46,9 @@ public class BotService extends AccessibilityService {
     private String blocked, prevKey;
     private int rights = 15;
     private int sw, sh;
+    private final ArrayList<GradientDrawable> floatBg = new ArrayList<>();
+    private final ArrayList<TextView> floatTv = new ArrayList<>();
+    private int bAlpha;
 
     @Override protected void onServiceConnected() {
         inst = this;
@@ -99,6 +102,8 @@ public class BotService extends AccessibilityService {
         h.removeCallbacksAndMessages(null);
         for (View v : floats) removeView(v);
         floats.clear();
+        floatBg.clear();
+        floatTv.clear();
         hideFrame();
         if (eng != null) { eng.destroy(); eng = null; }
         autoBg = null;
@@ -165,53 +170,140 @@ public class BotService extends AccessibilityService {
         toast(tpl == null ? "Фигуры ещё не запомнены — откройте «▣» и нажмите «Запомнить»" : "Готово. A — авто, 1 — один ход");
     }
 
+    private void setFloatsVisible(boolean v) {
+        for (View f : floats) f.setVisibility(v ? View.VISIBLE : View.INVISIBLE);
+    }
+
     private void learnNow() {
-        if (frame == null || CaptureService.inst == null) return;
+        if (frame == null || CaptureService.inst == null || busy) return;
+        busy = true;
         final Rect r = currentRect();
-        board = r;
-        Prefs.setBoard(this, r.left, r.top, r.width());
-        frame.setVisibility(View.INVISIBLE); // чтобы рамка не попала в кадр
+        frame.setVisibility(View.INVISIBLE); // рамка и кнопки не должны попасть в кадр
+        setFloatsVisible(false);
         toast("Запоминаю фигуры…");
+        final CaptureService cs0 = CaptureService.inst;
+        final int seq0 = cs0.seq();
+        final long t0 = System.currentTimeMillis();
         h.postDelayed(new Runnable() {
             @Override public void run() {
                 CaptureService cs = CaptureService.inst;
-                Recognizer.Frame f = cs == null ? null : cs.grab(r);
-                if (frame != null) frame.setVisibility(View.VISIBLE);
-                if (f == null) { toast("Не удалось получить кадр экрана"); return; }
-                String[] err = new String[1];
-                Recognizer.Templates t = Recognizer.learn(f, wb, err);
-                if (t == null) { toast(err[0]); return; }
-                tpl = t;
-                Prefs.setTpl(BotService.this, t.ser());
-                toast("Фигуры запомнены ✓ Нажмите «Готово»");
+                // ждём, пока придёт кадр уже БЕЗ рамки и кнопок (но не дольше 2 с)
+                if (cs != null && cs.seq() == seq0 && System.currentTimeMillis() - t0 < 2000) { h.postDelayed(this, 100); return; }
+                final CaptureService fcs = cs;
+                final boolean white = wb;
+                new Thread(new Runnable() {
+                    @Override public void run() {
+                        final String[] err = new String[1];
+                        final int[] bd = new int[3];
+                        Recognizer.Templates t = null;
+                        String note = "";
+                        int pad = 48;
+                        Rect big = new Rect(Math.max(0, r.left - pad), Math.max(0, r.top - pad),
+                                Math.min(sw, r.right + pad), Math.min(sh, r.bottom + pad));
+                        Recognizer.Frame bf = fcs == null ? null : fcs.grab(big);
+                        if (bf == null) err[0] = "Не удалось получить кадр экрана";
+                        else {
+                            int[] loc = Recognizer.locate(bf, r.left - big.left, r.top - big.top, r.width(), pad);
+                            int bx, by, bs;
+                            if (loc != null) { bx = loc[0]; by = loc[1]; bs = loc[2]; note = " (рамка подогнана)"; }
+                            else { bx = r.left - big.left; by = r.top - big.top; bs = r.width(); }
+                            bs = Math.min(bs, Math.min(bf.w - bx, bf.h - by));
+                            t = Recognizer.learn(bf.view(bx, by, bs), white, err);
+                            bd[0] = big.left + bx; bd[1] = big.top + by; bd[2] = bs;
+                        }
+                        final Recognizer.Templates ft = t;
+                        final String fnote = note;
+                        h.post(new Runnable() {
+                            @Override public void run() {
+                                busy = false;
+                                if (!running) return;
+                                if (frame != null) frame.setVisibility(View.VISIBLE);
+                                setFloatsVisible(true);
+                                if (ft == null) { toastLong(err[0]); return; }
+                                board = new Rect(bd[0], bd[1], bd[0] + bd[2], bd[1] + bd[2]);
+                                Prefs.setBoard(BotService.this, bd[0], bd[1], bd[2]);
+                                tpl = ft;
+                                Prefs.setTpl(BotService.this, ft.ser());
+                                if (frame != null) { // сдвигаем рамку на найденную доску
+                                    flp.x = bd[0]; flp.y = bd[1]; flp.width = bd[2]; flp.height = bd[2];
+                                    wm.updateViewLayout(frame, flp);
+                                }
+                                toast("Фигуры запомнены ✓" + fnote + " Нажмите «Готово»");
+                                warnFloatsOnBoard();
+                            }
+                        });
+                    }
+                }).start();
             }
-        }, 500);
+        }, 400);
+    }
+
+    private void toastLong(String s) { Toast.makeText(this, s, Toast.LENGTH_LONG).show(); }
+
+    /** видимые кнопки поверх доски мешают распознаванию */
+    private void warnFloatsOnBoard() {
+        if (bAlpha <= 0 || board == null) return;
+        Rect fr = new Rect();
+        for (View v : floats) {
+            WindowManager.LayoutParams lp = (WindowManager.LayoutParams) v.getLayoutParams();
+            fr.set(lp.x, lp.y, lp.x + lp.width, lp.y + lp.height);
+            if (Rect.intersects(fr, board)) {
+                toastLong("Кнопка лежит на доске — бот будет путаться. Перетащите её за доску или сделайте невидимой в настройках.");
+                return;
+            }
+        }
     }
 
     // ------------------------------------------------------------ плавающие кнопки
 
     private void addFloats() {
+        bAlpha = Prefs.btnAlpha(this);
         int size = dp(54);
-        int x = sw - size - dp(10), y = (int) (sh * 0.25f), gap = dp(64);
-        TextView a = floatBtn("A", x, y, size, new Runnable() { @Override public void run() { setAuto(!autoOn); } });
+        int gap = dp(64);
+        int x0 = sw - size - dp(10), y0 = sh - dp(190) - 3 * gap; // по умолчанию — правый нижний угол, вне доски
+        TextView a = floatBtn("A", "A", x0, y0, size, new Runnable() { @Override public void run() { setAuto(!autoOn); } });
         autoBg = (GradientDrawable) a.getBackground();
-        floatBtn("1", x, y + gap, size, new Runnable() { @Override public void run() { oneMove(); } });
-        floatBtn("▣", x, y + 2 * gap, size, new Runnable() { @Override public void run() { showFrame(); } });
+        floatBtn("1", "1", x0, y0 + gap, size, new Runnable() { @Override public void run() { oneMove(); } });
+        floatBtn("▣", "F", x0, y0 + 2 * gap, size, new Runnable() { @Override public void run() { showFrame(); } });
+        applyFloatLook(false);
+        // подсказка: первые 4 секунды кнопки видны, чтобы было ясно, где они
+        if (bAlpha < 60) {
+            applyFloatLook(true);
+            h.postDelayed(new Runnable() { @Override public void run() { applyFloatLook(false); } }, 4000);
+        }
     }
 
-    private TextView floatBtn(String txt, int x, int y, int size, final Runnable click) {
+    /** bAlpha 0 = невидимы (но нажимаются), 100 = как есть */
+    private void applyFloatLook(boolean flash) {
+        float k = flash ? 0.8f : bAlpha / 100f;
+        for (int i = 0; i < floatBg.size(); i++) {
+            GradientDrawable g = floatBg.get(i);
+            boolean on = g == autoBg && autoOn;
+            int base = on ? 0xCC2E7D32 : 0x66202428;
+            // фон никогда не бывает строго прозрачным (1/255), чтобы кнопка гарантированно принимала касания
+            int a = k <= 0 ? 1 : Math.max(1, Math.round(((base >>> 24) * k)));
+            g.setColor((a << 24) | (base & 0xFFFFFF));
+            g.setStroke(dp(2), k <= 0 ? 0x00FFFFFF : ((Math.round(0x99 * k) << 24) | 0xFFFFFF));
+            floatTv.get(i).setTextColor(k <= 0 ? 0x00FFFFFF : ((Math.round(255 * k) << 24) | 0xFFFFFF));
+        }
+    }
+
+    private TextView floatBtn(String txt, final String id, int x, int y, int size, final Runnable click) {
         final TextView t = new TextView(this);
         t.setText(txt);
         t.setGravity(Gravity.CENTER);
-        t.setTextColor(0xFFFFFFFF);
         t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
         t.setTypeface(Typeface.DEFAULT_BOLD);
-        t.setAlpha(0.75f);
         GradientDrawable g = new GradientDrawable();
         g.setShape(GradientDrawable.OVAL);
-        g.setColor(0x66202428);
-        g.setStroke(dp(2), 0x99FFFFFF);
         t.setBackground(g);
+        floatBg.add(g);
+        floatTv.add(t);
+        int[] saved = Prefs.btnPos(this, id);
+        if (saved != null) {
+            x = Math.max(0, Math.min(sw - size, saved[0]));
+            y = Math.max(0, Math.min(sh - size, saved[1]));
+        }
         final WindowManager.LayoutParams lp = overlayParams(size, size, x, y);
         final int slop = ViewConfiguration.get(this).getScaledTouchSlop();
         t.setOnTouchListener(new View.OnTouchListener() {
@@ -234,7 +326,8 @@ public class BotService extends AccessibilityService {
                         return true;
                     }
                     case MotionEvent.ACTION_UP:
-                        if (!moved) click.run();
+                        if (moved) Prefs.setBtnPos(BotService.this, id, lp.x, lp.y);
+                        else click.run();
                         return true;
                     default:
                         return false;
@@ -276,7 +369,7 @@ public class BotService extends AccessibilityService {
     private void setAuto(boolean on) {
         if (on && !ready()) return;
         autoOn = on;
-        if (autoBg != null) autoBg.setColor(on ? 0xCC2E7D32 : 0x66202428);
+        applyFloatLook(false);
         h.removeCallbacks(tick);
         if (on) { prevKey = null; h.postDelayed(tick, 300); }
         toast(on ? "Авто-режим включён" : "Авто-режим выключен");

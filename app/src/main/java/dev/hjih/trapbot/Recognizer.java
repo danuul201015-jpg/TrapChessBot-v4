@@ -16,8 +16,13 @@ final class Recognizer {
     static final String START = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR";
 
     static final class Frame {
-        final int[] px; final int w, h;
-        Frame(int[] px, int w, int h) { this.px = px; this.w = w; this.h = h; }
+        final int[] px; final int w, h, ox, oy, stride;
+        Frame(int[] px, int w, int h) { this(px, w, h, 0, 0, w); }
+        private Frame(int[] px, int w, int h, int ox, int oy, int stride) {
+            this.px = px; this.w = w; this.h = h; this.ox = ox; this.oy = oy; this.stride = stride;
+        }
+        /** квадратный фрагмент без копирования пикселей */
+        Frame view(int x, int y, int s) { return new Frame(px, s, s, ox + x, oy + y, stride); }
     }
 
     static final class Templates {
@@ -76,7 +81,7 @@ final class Recognizer {
     private static int px(Frame f, int x, int y) {
         x = Math.max(0, Math.min(f.w - 1, x));
         y = Math.max(0, Math.min(f.h - 1, y));
-        return f.px[y * f.w + x];
+        return f.px[(y + f.oy) * f.stride + x + f.ox];
     }
 
     /** цвет фона клетки: медиана по четырём точкам у середин краёв */
@@ -172,19 +177,88 @@ final class Recognizer {
         return ' ';
     }
 
+    private static float lum(int p) {
+        return 0.299f * ((p >> 16) & 255) + 0.587f * ((p >> 8) & 255) + 0.114f * (p & 255);
+    }
+
+    /** сила края (смена яркости) в позиции i профиля p, ищем максимум в окрестности ±2 */
+    private static float edge(float[] p, int i) {
+        float best = 0;
+        for (int d = -2; d <= 2; d++) {
+            int c = i + d;
+            if (c < 4 || c + 4 > p.length) continue;
+            float l = 0, r = 0;
+            for (int k = 1; k <= 4; k++) { l += p[c - k]; r += p[c + k - 1]; }
+            best = Math.max(best, Math.abs(l - r) / 4f);
+        }
+        return best;
+    }
+
+    /**
+     * Находит доску по сетке клеток (границы между светлыми и тёмными клетками в пустых рядах 3–6).
+     * f — кадр с запасом вокруг рамки; (nx,ny,ns) — где пользователь приблизительно поставил рамку.
+     * Возвращает {x, y, size} в координатах f либо null.
+     */
+    static int[] locate(Frame f, int nx, int ny, int ns, int pad) {
+        float q0 = ns / 8f;
+        // вертикальные границы: средняя яркость столбцов в полосе пустых рядов
+        int ya = Math.max(0, Math.round(ny + 3.35f * q0)), yb = Math.min(f.h, Math.round(ny + 3.65f * q0)); // одна пустая горизонталь
+        if (yb - ya < 8) return null;
+        float[] col = new float[f.w];
+        for (int x = 0; x < f.w; x++) {
+            float s = 0;
+            for (int y = ya; y < yb; y++) s += lum(px(f, x, y));
+            col[x] = s / (yb - ya);
+        }
+        float bs = -1, bx = nx, bq = q0;
+        for (float q = q0 - pad / 4f; q <= q0 + pad / 4f; q += 0.25f)
+            for (int x0 = nx - pad; x0 <= nx + pad; x0++) {
+                float sc = 0;
+                for (int k = 1; k <= 7; k++) sc += edge(col, Math.round(x0 + k * q));
+                if (sc > bs) { bs = sc; bx = x0; bq = q; }
+            }
+        // горизонтальные границы между пустыми рядами (k = 3,4,5), период уже известен
+        int xa = Math.max(0, Math.round(bx + 3.35f * bq)), xb = Math.min(f.w, Math.round(bx + 3.65f * bq)); // одна вертикаль
+        if (xb - xa < 8) return null;
+        float[] row = new float[f.h];
+        for (int y = 0; y < f.h; y++) {
+            float s = 0;
+            for (int x = xa; x < xb; x++) s += lum(px(f, x, y));
+            row[y] = s / (xb - xa);
+        }
+        float bs2 = -1, by = ny;
+        for (int y0 = ny - pad; y0 <= ny + pad; y0++) {
+            float sc = 0;
+            for (int k = 3; k <= 5; k++) sc += edge(row, Math.round(y0 + k * bq));
+            if (sc > bs2) { bs2 = sc; by = y0; }
+        }
+        if (bs < 7 * 20 || bs2 < 3 * 20) return null; // сетки не видно (контраст клеток слишком мал)
+        return new int[]{Math.round(bx), Math.round(by), Math.round(8 * bq)};
+    }
+
+    static String sqName(int col, int row, boolean wb) {
+        int file = wb ? col : 7 - col, rank = wb ? 7 - row : row;
+        return "" + (char) ('a' + file) + (rank + 1);
+    }
+
     static Templates learn(Frame f, boolean wb, String[] err) {
         Templates t = new Templates();
         float[] st = new float[2];
-        float emptyMax = 0, pieceMin = 1;
+        float[][] fill = new float[8][8];
         double[] ls = new double[2];
         int[] ln = new int[2];
+        float emptyMax = 0, pieceMin = 1, pieceMax = 0;
+        ArrayList<Float> pf = new ArrayList<>();
         for (int row = 0; row < 8; row++) for (int col = 0; col < 8; col++) {
             char ex = expected(col, row, wb);
             boolean[] m = sil(f, col, row, st);
+            fill[row][col] = st[0];
             if (ex == ' ') {
                 emptyMax = Math.max(emptyMax, st[0]);
             } else {
                 pieceMin = Math.min(pieceMin, st[0]);
+                pieceMax = Math.max(pieceMax, st[0]);
+                pf.add(st[0]);
                 int c = Character.isUpperCase(ex) ? 0 : 1;
                 int ty = ORDER.indexOf(Character.toUpperCase(ex));
                 t.list[c][ty].add(m);
@@ -192,8 +266,26 @@ final class Recognizer {
                 ln[c]++;
             }
         }
-        if (emptyMax >= pieceMin * 0.8f) {
-            err[0] = "Не вижу разницу между пустыми клетками и фигурами. Проверьте рамку (она должна точно совпадать с доской) и что на доске начальная позиция.";
+        String nums = String.format(java.util.Locale.US, " (пустые до %.2f, фигуры от %.2f)", emptyMax, pieceMin);
+        if (pieceMax < 0.08f) {
+            err[0] = "Кадр пустой или однотонный: бот не видит доску. Проверьте, что рамка стоит на доске и что трансляция — «весь экран».";
+            return null;
+        }
+        java.util.Collections.sort(pf);
+        float med = pf.get(pf.size() / 2);
+        // клетки, где должна быть фигура, а их нет (рамка сбита / не начальная позиция)
+        StringBuilder miss = new StringBuilder(), junk = new StringBuilder();
+        for (int row = 0; row < 8; row++) for (int col = 0; col < 8; col++) {
+            char ex = expected(col, row, wb);
+            if (ex != ' ' && fill[row][col] < 0.45f * med) miss.append(miss.length() > 0 ? ", " : "").append(sqName(col, row, wb));
+            if (ex == ' ' && fill[row][col] >= 0.8f * pieceMin) junk.append(junk.length() > 0 ? ", " : "").append(sqName(col, row, wb));
+        }
+        if (junk.length() > 0) {
+            err[0] = "Должны быть пустыми, но там что-то есть: " + junk + ". Уберите с доски кнопки/подсказки/рамку и проверьте, что рамка точно по доске." + nums;
+            return null;
+        }
+        if (miss.length() > 0) {
+            err[0] = "Не вижу фигуры на: " + miss + ". Проверьте рамку и начальную позицию." + nums;
             return null;
         }
         t.lum0 = (float) (ls[0] / ln[0]);

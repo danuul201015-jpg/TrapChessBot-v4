@@ -13,6 +13,19 @@ final class Prefs {
     static boolean adapt(Context c) { return sp(c).getBoolean("adapt", true); }
     static boolean drag(Context c) { return sp(c).getBoolean("drag", false); }
 
+    /** видимость плавающих кнопок, % (0 = полностью невидимы, но нажимаются) */
+    static int btnAlpha(Context c) { return Math.max(0, Math.min(100, sp(c).getInt("balpha", 0))); }
+
+    /** положение плавающей кнопки (пиксели экрана) или null */
+    static int[] btnPos(Context c, String name) {
+        SharedPreferences p = sp(c);
+        if (!p.contains("fx_" + name)) return null;
+        return new int[]{p.getInt("fx_" + name, 0), p.getInt("fy_" + name, 0)};
+    }
+    static void setBtnPos(Context c, String name, int x, int y) {
+        sp(c).edit().putInt("fx_" + name, x).putInt("fy_" + name, y).apply();
+    }
+
     static String tpl(Context c) { return sp(c).getString("tpl", null); }
     static void setTpl(Context c, String s) { sp(c).edit().putString("tpl", s).apply(); }
 

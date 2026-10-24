@@ -25,8 +25,8 @@ import android.text.InputType;
 
 public class MainActivity extends Activity {
     private EditText depth, time;
-    private SeekBar cun;
-    private TextView cunTxt, status;
+    private SeekBar cun, balpha;
+    private TextView cunTxt, balphaTxt, status;
     private RadioButton rw, rb;
     private CheckBox adapt, drag;
 
@@ -105,6 +105,19 @@ public class MainActivity extends Activity {
         ll.addView(adapt);
         ll.addView(drag);
 
+        balphaTxt = tv("", 15, true);
+        ll.addView(balphaTxt);
+        balpha = new SeekBar(this);
+        balpha.setMax(100);
+        balpha.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar s, int p, boolean u) { balphaTxt.setText(balLabel(p)); }
+            @Override public void onStartTrackingTouch(SeekBar s) { }
+            @Override public void onStopTrackingTouch(SeekBar s) { }
+        });
+        ll.addView(balpha);
+        ll.addView(tv("При 0% кнопки невидимы, но нажимаются; первые 4 секунды после запуска они подсвечены, "
+                + "а их место запоминается после перетаскивания.", 13, false));
+
         ll.addView(btn("Запустить", v -> start()));
         ll.addView(btn("Остановить", v -> stop()));
         status = tv("", 14, false);
@@ -118,6 +131,12 @@ public class MainActivity extends Activity {
         cunTxt.setText("Хитрость: " + Prefs.cun(this));
         adapt.setChecked(Prefs.adapt(this));
         drag.setChecked(Prefs.drag(this));
+        balpha.setProgress(Prefs.btnAlpha(this));
+        balphaTxt.setText(balLabel(Prefs.btnAlpha(this)));
+    }
+
+    private String balLabel(int p) {
+        return "Видимость кнопок: " + p + "%" + (p == 0 ? " (невидимы)" : "");
     }
 
     @Override protected void onResume() {
@@ -145,7 +164,7 @@ public class MainActivity extends Activity {
         Prefs.sp(this).edit()
                 .putInt("depth", d).putFloat("time", t).putInt("cun", cun.getProgress())
                 .putBoolean("white", rw.isChecked()).putBoolean("adapt", adapt.isChecked())
-                .putBoolean("drag", drag.isChecked()).apply();
+                .putBoolean("drag", drag.isChecked()).putInt("balpha", balpha.getProgress()).apply();
         depth.setText(String.valueOf(d));
         time.setText(String.valueOf(t));
     }

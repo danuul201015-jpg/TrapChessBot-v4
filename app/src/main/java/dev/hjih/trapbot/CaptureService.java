@@ -34,6 +34,7 @@ public class CaptureService extends Service {
     private HandlerThread ht;
     private final Object lock = new Object();
     private Image last;
+    private volatile int seq;
 
     @Override public IBinder onBind(Intent i) { return null; }
 
@@ -80,6 +81,7 @@ public class CaptureService extends Service {
             synchronized (lock) {
                 if (last != null) last.close();
                 last = im;
+                seq++;
             }
         }, bh);
         vd = proj.createVirtualDisplay("trapbot", w, h, dm.densityDpi,
@@ -87,6 +89,9 @@ public class CaptureService extends Service {
         inst = this;
         return START_NOT_STICKY;
     }
+
+    /** номер последнего полученного кадра (растёт с каждым новым кадром) */
+    int seq() { return seq; }
 
     /** Вырезает прямоугольник из последнего кадра экрана (координаты в пикселях экрана). */
     Recognizer.Frame grab(Rect r) {
