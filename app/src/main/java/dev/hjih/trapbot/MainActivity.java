@@ -141,6 +141,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        if (rw != null) { rw.setChecked(Prefs.white(this)); rb.setChecked(!Prefs.white(this)); } // сторону могла сменить кнопка «Б/Ч»
         refresh();
     }
 

@@ -49,6 +49,9 @@ public class BotService extends AccessibilityService {
     private final ArrayList<GradientDrawable> floatBg = new ArrayList<>();
     private final ArrayList<TextView> floatTv = new ArrayList<>();
     private int bAlpha;
+    private int fails;
+    private boolean retryNext;
+    private TextView sideBtn;
 
     @Override protected void onServiceConnected() {
         inst = this;
@@ -260,11 +263,12 @@ public class BotService extends AccessibilityService {
         bAlpha = Prefs.btnAlpha(this);
         int size = dp(54);
         int gap = dp(64);
-        int x0 = sw - size - dp(10), y0 = sh - dp(190) - 3 * gap; // по умолчанию — правый нижний угол, вне доски
+        int x0 = sw - size - dp(10), y0 = sh - dp(190) - 4 * gap; // по умолчанию — правый нижний угол, вне доски
         TextView a = floatBtn("A", "A", x0, y0, size, new Runnable() { @Override public void run() { setAuto(!autoOn); } });
         autoBg = (GradientDrawable) a.getBackground();
         floatBtn("1", "1", x0, y0 + gap, size, new Runnable() { @Override public void run() { oneMove(); } });
         floatBtn("▣", "F", x0, y0 + 2 * gap, size, new Runnable() { @Override public void run() { showFrame(); } });
+        sideBtn = floatBtn(wb ? "Б" : "Ч", "S", x0, y0 + 3 * gap, size, new Runnable() { @Override public void run() { switchSide(); } });
         applyFloatLook(false);
         // подсказка: первые 4 секунды кнопки видны, чтобы было ясно, где они
         if (bAlpha < 60) {
@@ -362,7 +366,7 @@ public class BotService extends AccessibilityService {
         @Override public void run() {
             if (!running || !autoOn) return;
             if (!busy) autoStep();
-            h.postDelayed(this, 600);
+            h.postDelayed(this, 150);
         }
     };
 
@@ -371,7 +375,7 @@ public class BotService extends AccessibilityService {
         autoOn = on;
         applyFloatLook(false);
         h.removeCallbacks(tick);
-        if (on) { prevKey = null; h.postDelayed(tick, 300); }
+        if (on) { prevKey = null; fails = 0; retryNext = false; h.postDelayed(tick, 100); }
         toast(on ? "Авто-режим включён" : "Авто-режим выключен");
     }
 
@@ -417,25 +421,58 @@ public class BotService extends AccessibilityService {
                 String info = o.optString("info", "");
                 if (!info.isEmpty()) toast(info);
                 final String expKey = Recognizer.place(Recognizer.apply(bd, ff, fr, tf, tr, pr));
-                doMove(ff, fr, tf, tr, pr > 0, new Runnable() {
-                    @Override public void run() {
-                        h.postDelayed(new Runnable() {
-                            @Override public void run() {
-                                Recognizer.Res r2 = read();
-                                if (r2 != null && r2.ok && r2.key.equals(oldKey)) {
-                                    blocked = oldKey; // ход не прошёл: не повторяем на той же позиции
-                                    toast("Ход не выполнился (не мой ход или нажатие не сработало)");
-                                } else {
-                                    blocked = expKey;
-                                }
-                                prevKey = null;
-                                busy = false;
-                            }
-                        }, 900);
-                    }
+                final boolean retry = retryNext;
+                doMove(ff, fr, tf, tr, pr > 0, retry, new Runnable() {
+                    @Override public void run() { verify(oldKey, expKey, 0, null); }
                 });
             }
         });
+    }
+
+    /** ждём, пока ход появится на доске (приложение может отрисовать его с задержкой); при неудаче — повторяем */
+    private void verify(final String oldKey, final String expKey, final int n, final String lastKey) {
+        h.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (!running) { busy = false; return; }
+                Recognizer.Res r2 = read();
+                String k = (r2 != null && r2.ok) ? r2.key : null;
+                if (k != null && !k.equals(oldKey) && k.equals(lastKey)) {
+                    fails = 0;
+                    retryNext = false;
+                    blocked = k.equals(expKey) ? expKey : null; // иначе соперник уже ответил — снова наш ход
+                    prevKey = null;
+                    busy = false;
+                    return;
+                }
+                if (n >= 20) { // ~2.5 с без изменений: нажатие не сработало
+                    fails++;
+                    prevKey = null;
+                    if (fails >= 3) {
+                        fails = 0;
+                        retryNext = false;
+                        blocked = oldKey;
+                        toast("Ход не получается. Проверьте рамку/сторону или нажмите «1»");
+                    } else {
+                        retryNext = true; // следующая попытка начнётся с другой последовательности нажатий
+                    }
+                    busy = false;
+                    return;
+                }
+                verify(oldKey, expKey, n + 1, k);
+            }
+        }, 120);
+    }
+
+    private void switchSide() {
+        wb = !wb;
+        Prefs.sp(this).edit().putBoolean("white", wb).apply();
+        blocked = null;
+        prevKey = null;
+        rights = 15;
+        fails = 0;
+        retryNext = false;
+        if (sideBtn != null) sideBtn.setText(wb ? "Б" : "Ч");
+        toast(wb ? "Играю белыми (белые внизу)" : "Играю чёрными (чёрные внизу)");
     }
 
     // ------------------------------------------------------------ нажатия
@@ -445,37 +482,43 @@ public class BotService extends AccessibilityService {
         return new PointF(board.left + (col + .5f) * board.width() / 8f, board.top + (row + .5f) * board.height() / 8f);
     }
 
-    private void doMove(int ff, int fr, int tf, int tr, final boolean promo, final Runnable done) {
+    private void doMove(int ff, int fr, int tf, int tr, final boolean promo, boolean retry, final Runnable done) {
         final PointF a = center(ff, fr), b = center(tf, tr);
         final Runnable fin = new Runnable() {
             @Override public void run() {
-                if (promo) h.postDelayed(new Runnable() { @Override public void run() { tap(b.x, b.y, done); } }, 450); // ферзь
+                if (promo) h.postDelayed(new Runnable() { @Override public void run() { tap(b.x, b.y, done); } }, 250); // ферзь
                 else done.run();
             }
         };
         if (Prefs.drag(this)) swipe(a, b, fin);
+        else if (retry) {
+            // прошлая попытка могла оставить фигуру выбранной: сперва «клетка назначения», потом заново
+            tap(b.x, b.y, new Runnable() { @Override public void run() {
+                tap(a.x, a.y, new Runnable() { @Override public void run() { tap(b.x, b.y, fin); } });
+            } });
+        }
         else tap(a.x, a.y, new Runnable() { @Override public void run() { tap(b.x, b.y, fin); } });
     }
 
     private void tap(float x, float y, Runnable then) {
         Path p = new Path();
         p.moveTo(x, y);
-        gesture(new GestureDescription.StrokeDescription(p, 0, 60), then);
+        gesture(new GestureDescription.StrokeDescription(p, 0, 30), then);
     }
 
     private void swipe(PointF a, PointF b, Runnable then) {
         Path p = new Path();
         p.moveTo(a.x, a.y);
         p.lineTo(b.x, b.y);
-        gesture(new GestureDescription.StrokeDescription(p, 0, 260), then);
+        gesture(new GestureDescription.StrokeDescription(p, 0, 160), then);
     }
 
     private void gesture(GestureDescription.StrokeDescription sd, final Runnable then) {
         GestureDescription g = new GestureDescription.Builder().addStroke(sd).build();
         boolean ok = dispatchGesture(g, new GestureResultCallback() {
-            @Override public void onCompleted(GestureDescription d) { if (then != null) h.postDelayed(then, 250); }
-            @Override public void onCancelled(GestureDescription d) { if (then != null) h.postDelayed(then, 250); }
+            @Override public void onCompleted(GestureDescription d) { if (then != null) h.postDelayed(then, 40); }
+            @Override public void onCancelled(GestureDescription d) { if (then != null) h.postDelayed(then, 40); }
         }, null);
-        if (!ok && then != null) h.postDelayed(then, 250);
+        if (!ok && then != null) h.postDelayed(then, 40);
     }
 }
