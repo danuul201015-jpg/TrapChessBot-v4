@@ -1,0 +1,25 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><script>
+var w=null,sync=false,pend=null;
+function log(s){try{Android.onLog(s)}catch(e){}}
+function send(o){try{Android.onResult(JSON.stringify(o))}catch(e){}}
+function fallback(){
+  if(sync)return;sync=true;w=null;log('worker недоступен, движок работает в странице');
+  var a=document.createElement('script');a.src='engine.js';
+  a.onload=function(){var b=document.createElement('script');b.src='handler.js';
+    b.onload=function(){if(pend){var q=pend;pend=null;run(q)}};document.head.appendChild(b)};
+  document.head.appendChild(a);
+}
+try{
+  w=new Worker('worker.js');
+  w.onmessage=function(e){pend=null;send(e.data)};
+  w.onerror=function(e){log('worker error '+(e&&e.message));fallback()};
+}catch(err){fallback()}
+function run(q){
+  pend=q;
+  if(sync){
+    if(typeof handle==='function'){var p=pend;pend=null;setTimeout(function(){send(handle(p))},0)}
+    return;
+  }
+  if(w)w.postMessage(q);
+}
+</script></body></html>
