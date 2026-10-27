@@ -24,7 +24,7 @@ import android.widget.Toast;
 import android.text.InputType;
 
 public class MainActivity extends Activity {
-    private EditText depth, time;
+    private EditText depth, time, threadsEt;
     private SeekBar cun, balpha;
     private TextView cunTxt, balphaTxt, status;
     private RadioButton rw, rb;
@@ -84,10 +84,15 @@ public class MainActivity extends Activity {
         depth.setInputType(InputType.TYPE_CLASS_NUMBER);
         ll.addView(depth);
 
-        ll.addView(tv("Время на ход, секунд (0.1–100)", 15, true));
+        ll.addView(tv("Время на ход, секунд: число или диапазон (3 · 0.1-1 · 5-6 · 0.1-50), от 0.1 до 100", 15, true));
         time = new EditText(this);
-        time.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        time.setInputType(InputType.TYPE_CLASS_TEXT);
         ll.addView(time);
+
+        ll.addView(tv("Потоки движка (0 = авто: все ядра, до 8; применяется при запуске)", 15, true));
+        threadsEt = new EditText(this);
+        threadsEt.setInputType(InputType.TYPE_CLASS_NUMBER);
+        ll.addView(threadsEt);
 
         cunTxt = tv("", 15, true);
         ll.addView(cunTxt);
@@ -126,7 +131,8 @@ public class MainActivity extends Activity {
         rw.setChecked(Prefs.white(this));
         rb.setChecked(!Prefs.white(this));
         depth.setText(String.valueOf(Prefs.depth(this)));
-        time.setText(String.valueOf(Prefs.timeSec(this)));
+        time.setText(Prefs.timeText(this));
+        threadsEt.setText(String.valueOf(Prefs.threads(this)));
         cun.setProgress(Prefs.cun(this));
         cunTxt.setText("Хитрость: " + Prefs.cun(this));
         adapt.setChecked(Prefs.adapt(this));
@@ -159,15 +165,18 @@ public class MainActivity extends Activity {
         int d;
         try { d = Integer.parseInt(depth.getText().toString().trim()); } catch (Exception e) { d = 8; }
         d = Math.max(1, Math.min(100, d));
-        float t;
-        try { t = Float.parseFloat(time.getText().toString().trim().replace(',', '.')); } catch (Exception e) { t = 3f; }
-        t = Math.max(0.1f, Math.min(100f, t));
+        float[] tr = Prefs.parseTime(time.getText().toString());
+        String t = tr == null ? "3" : Prefs.fmtRange(tr);
+        int th;
+        try { th = Integer.parseInt(threadsEt.getText().toString().trim()); } catch (Exception e) { th = 0; }
+        th = Math.max(0, Math.min(16, th));
+        threadsEt.setText(String.valueOf(th));
         Prefs.sp(this).edit()
-                .putInt("depth", d).putFloat("time", t).putInt("cun", cun.getProgress())
+                .putInt("threads", th).putInt("depth", d).putString("timeText", t).putInt("cun", cun.getProgress())
                 .putBoolean("white", rw.isChecked()).putBoolean("adapt", adapt.isChecked())
                 .putBoolean("drag", drag.isChecked()).putInt("balpha", balpha.getProgress()).apply();
         depth.setText(String.valueOf(d));
-        time.setText(String.valueOf(t));
+        time.setText(t);
     }
 
     private void start() {

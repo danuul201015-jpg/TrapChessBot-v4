@@ -10,6 +10,17 @@ final class TT {
     private final int mask;
     int gen;
 
+    /** Размер таблицы по умолчанию: 2^22 записей × 16 байт = 64 МБ. */
+    static final int DEFAULT_BITS = 22;
+
+    /** Выделяет таблицу на bits бит; если памяти не хватает — уменьшает вдвое, пока не поместится. */
+    static TT alloc(int bits) {
+        for (int b = bits; ; b--) {
+            try { return new TT(b); }
+            catch (OutOfMemoryError e) { if (b <= 16) throw e; }
+        }
+    }
+
     TT(int bits) {
         k = new long[1 << bits];
         v = new long[1 << bits];

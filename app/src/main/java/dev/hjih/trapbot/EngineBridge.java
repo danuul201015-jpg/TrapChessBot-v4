@@ -2,6 +2,7 @@ package dev.hjih.trapbot;
 
 import android.os.Handler;
 import android.os.Looper;
+import android.os.Process;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -27,15 +28,33 @@ final class EngineBridge {
     private int seq;
 
     EngineBridge(android.content.Context c) {
+        // авто: все ядра (до 8) — на MediaTek Dimensity 1080 это 2 больших A78 + 6 малых A55;
+        // работа раздаётся динамически, поэтому медленные ядра просто берут меньше задач
         int cores = Runtime.getRuntime().availableProcessors();
-        eng = new TrapEngine(Math.max(1, Math.min(6, cores)));
+        int set = Prefs.threads(c);
+        int n = set > 0 ? set : Math.min(8, cores);
+        eng = new TrapEngine(Math.max(1, n), new Runnable() {
+            @Override public void run() { prio(Process.THREAD_PRIORITY_DISPLAY, Process.THREAD_PRIORITY_FOREGROUND); }
+        });
         ex = Executors.newSingleThreadExecutor(new ThreadFactory() {
-            @Override public Thread newThread(Runnable r) {
-                Thread t = new Thread(r, "trap-engine");
+            @Override public Thread newThread(final Runnable r) {
+                Thread t = new Thread(new Runnable() {
+                    @Override public void run() {
+                        // главный поток поиска — самый высокий приоритет, чтобы планировщик ставил его на большое ядро
+                        prio(Process.THREAD_PRIORITY_URGENT_DISPLAY, Process.THREAD_PRIORITY_DISPLAY);
+                        r.run();
+                    }
+                }, "trap-engine");
                 t.setDaemon(true);
                 return t;
             }
         });
+    }
+
+    /** пробует поднять приоритет текущего потока; если система не разрешает — запасное значение */
+    private static void prio(int want, int fallback) {
+        try { Process.setThreadPriority(want); return; } catch (Throwable ignored) { }
+        try { Process.setThreadPriority(fallback); } catch (Throwable ignored) { }
     }
 
     void think(final String fen, final int depth, final double sec, final int cun, final boolean adapt,

@@ -31,7 +31,7 @@ final class TrapEngine {
     private static final int[] INIT_GRID = grid(INIT);
 
     private final int threads;
-    private final TT tt = new TT(19);
+    private final TT tt = TT.alloc(TT.DEFAULT_BITS);
     private final Pos main = new Pos(tt);
     private final Pos[] workers;
     private final ExecutorService pool;
@@ -52,14 +52,22 @@ final class TrapEngine {
         int n;
     }
 
-    TrapEngine(int threads) {
+    TrapEngine(int threads) { this(threads, null); }
+
+    /** init выполняется один раз в начале каждого рабочего потока пула (например, чтобы поднять приоритет). */
+    TrapEngine(int threads, final Runnable init) {
         this.threads = Math.max(1, threads);
         workers = new Pos[this.threads];
         for (int i = 0; i < this.threads; i++) workers[i] = new Pos(tt);
         pool = this.threads > 1 ? Executors.newFixedThreadPool(this.threads - 1, new ThreadFactory() {
             private int k;
-            @Override public Thread newThread(Runnable r) {
-                Thread t = new Thread(r, "trap-worker-" + (k++));
+            @Override public Thread newThread(final Runnable r) {
+                Thread t = new Thread(new Runnable() {
+                    @Override public void run() {
+                        if (init != null) { try { init.run(); } catch (Throwable ignored) { } }
+                        r.run();
+                    }
+                }, "trap-worker-" + (k++));
                 t.setDaemon(true);
                 return t;
             }

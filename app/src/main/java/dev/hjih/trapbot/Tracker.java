@@ -12,12 +12,21 @@ final class Tracker {
     private static final String SYM = "PNBRQKpnbrqk";
 
     private final Pos p = new Pos(new TT(4));
+    private final Pos scratch = new Pos(new TT(4)); // для проверки собранной позиции, не портя ведомую
     private boolean has;
+    private boolean fresh; // при следующей сверке с экраном заново собрать позицию с доски
     private String target;
     private final int[] path = new int[4];
 
+    /** По умолчанию — начальная позиция шахмат, ход белых. */
+    Tracker() { reset(); }
+
     boolean has() { return has; }
-    void invalidate() { has = false; }
+    void invalidate() { has = false; fresh = false; }
+    /** начальная позиция по умолчанию */
+    void reset() { p.setFen(START_FEN); has = true; fresh = false; }
+    /** заново просканировать доску при следующей сверке (старая ведомая партия — только запасной вариант) */
+    void rescan() { fresh = true; }
     /** чья очередь по ведомой позиции: 0 — белые, 1 — чёрные */
     int side() { return p.side; }
 
@@ -119,21 +128,37 @@ final class Tracker {
      */
     boolean sync(Recognizer.Res r, boolean ourWhite) {
         if (r == null || !r.occOk) return false;
-        if (r.occKey.equals(Recognizer.START_OCC)) { p.setFen(START_FEN); has = true; return true; }
+        if (r.occKey.equals(Recognizer.START_OCC)) { reset(); return true; }
+        if (fresh) {
+            // позиция на экране совпала с ведомой партией — типы фигур уже известны точно, оставляем
+            if (has && r.occKey.equals(occNow())) fresh = false;
+            // иначе собираем позицию заново с доски (партия могла продолжиться без бота)
+            else if (r.ok && rebuild(r, ourWhite)) fresh = false;
+            if (!fresh) return true;
+            // силуэты не читаются — пробуем догнать по ведомой партии
+        }
         if (has) {
             boolean same = r.occKey.equals(occNow());
             if (same || follow(r)) {
-                if (!drift(r)) return true;
+                if (!drift(r)) { fresh = false; return true; }
             }
         }
         if (!r.ok) { has = false; return false; }
+        fresh = false;
+        if (rebuild(r, ourWhite)) return true;
+        has = false;
+        return false;
+    }
+
+    /** собрать позицию из силуэтов на экране (ход — нашей стороны); ведомая партия меняется только при успехе */
+    private boolean rebuild(Recognizer.Res r, boolean ourWhite) {
         int cs = Recognizer.possibleRights(r.b);
         for (int k = 0; k < 2; k++) {
             boolean w = k == 0 ? ourWhite : !ourWhite;
-            p.setFen(r.key + " " + (w ? "w" : "b") + " " + Recognizer.castle(cs) + " - 0 1");
-            if (p.sane().isEmpty()) { has = true; return true; }
+            String fen = r.key + " " + (w ? "w" : "b") + " " + Recognizer.castle(cs) + " - 0 1";
+            scratch.setFen(fen);
+            if (scratch.sane().isEmpty()) { p.setFen(fen); has = true; return true; }
         }
-        has = false;
         return false;
     }
 

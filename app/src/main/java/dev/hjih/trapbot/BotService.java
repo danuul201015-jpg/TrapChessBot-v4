@@ -57,6 +57,7 @@ public class BotService extends AccessibilityService {
     private int[] lastTry;
     private boolean sessionActed;
     private long lastErrToast;
+    private int syncFails;
 
     @Override protected void onServiceConnected() {
         inst = this;
@@ -90,7 +91,7 @@ public class BotService extends AccessibilityService {
         busy = false;
         blocked = null;
         prevKey = null;
-        tr.invalidate();
+        tr.reset(); // по умолчанию — начальная позиция
         sessionActed = false;
         banned.clear();
         banKey = null;
@@ -383,7 +384,7 @@ public class BotService extends AccessibilityService {
         autoOn = on;
         applyFloatLook(false);
         h.removeCallbacks(tick);
-        if (on) { prevKey = null; fails = 0; retryNext = false; sessionActed = false; banned.clear(); banKey = null; h.postDelayed(tick, 100); }
+        if (on) { tr.rescan(); blocked = null; syncFails = 0; prevKey = null; fails = 0; retryNext = false; sessionActed = false; banned.clear(); banKey = null; h.postDelayed(tick, 100); }
         toast(on ? "Авто-режим включён" : "Авто-режим выключен");
     }
 
@@ -395,7 +396,15 @@ public class BotService extends AccessibilityService {
         prevKey = r.occKey;
         if (!stable) return;                  // фигуры ещё двигаются
         if (r.occKey.equals(blocked)) return; // ждём хода соперника
-        if (!tr.sync(r, wb)) return;          // позицию пока не удалось определить
+        if (!tr.sync(r, wb)) {                // позицию пока не удалось определить
+            if (++syncFails >= 20) {
+                syncFails = 0;
+                long now = System.currentTimeMillis();
+                if (now - lastErrToast > 4000) { lastErrToast = now; toast("Не удаётся определить позицию на доске — проверьте рамку и сторону"); }
+            }
+            return;
+        }
+        syncFails = 0;
         if (tr.side() != (wb ? 0 : 1)) return; // по партии сейчас ход соперника
         act(r);
     }
@@ -508,7 +517,7 @@ public class BotService extends AccessibilityService {
         Prefs.sp(this).edit().putBoolean("white", wb).apply();
         blocked = null;
         prevKey = null;
-        tr.invalidate();
+        tr.rescan();
         fails = 0;
         retryNext = false;
         sessionActed = false;
