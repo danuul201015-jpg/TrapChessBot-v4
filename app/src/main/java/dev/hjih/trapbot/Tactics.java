@@ -179,6 +179,63 @@ final class Tactics {
         return r;
     }
 
+    // ================= агрессия =================
+    /** Давление на зону короля соперника: сколько полей вокруг него бьёт сторона us (+ шах). */
+    private static int pressure(Pos p, int us) {
+        int k = p.ksq[us ^ 1], pr = 0, back = us == 0 ? -16 : 16;
+        for (int dr = -1; dr <= 1; dr++)
+            for (int df = -1; df <= 1; df++) {
+                int q = k + dr * 16 + df;
+                if ((q & 0x88) != 0) continue;
+                int a = p.att(q, us, true);
+                if (a < Pos.NA) pr += a <= Pos.VAL[3] ? 9 : 6;
+            }
+        for (int df = -1; df <= 1; df++) {
+            int q = k + 2 * back + df;
+            if ((q & 0x88) == 0 && p.isAtt(q, us)) pr += 3;
+        }
+        if (p.isAtt(k, us)) pr += 25;
+        return pr;
+    }
+
+    /**
+     * Атакующая ценность хода m (p — позиция до хода, ходит «мы»): рост давления на короля, шахи,
+     * продвижение вперёд; штраф за пассивные отходы, когда фигуре ничего не грозит.
+     * Не материальная оценка — материал по-прежнему контролируется минимаксом в корне.
+     */
+    static int attack(Pos p, int m) {
+        int us = p.side, f = m & 127, t = (m >> 7) & 127, pt = p.b[f] & 7;
+        boolean cap = p.b[t] != 0 || ((m >> 17) & 1) != 0, castle = ((m >> 17) & 2) != 0;
+        boolean fromHit = p.isAtt(f, us ^ 1);
+        int adv = us == 0 ? (t >> 4) - (f >> 4) : (f >> 4) - (t >> 4);
+        int ekf = p.ksq[us ^ 1] & 7;
+        int before = pressure(p, us), s;
+        p.make(m);
+        try {
+            s = pressure(p, us) - before;
+            if (pt != 6 && !fromHit && adv > 0) s += 3 * adv;
+            if (pt == 1 && adv > 0 && Math.abs((t & 7) - ekf) <= 2) s += 5;      // пешечный штурм у короля
+            if (adv < 0 && !fromHit && !cap) s += 6 * adv;                        // пассивный отход
+            if (pt == 6 && !castle) s -= 8;
+            if (castle) s += 4;
+            if (cap) s += 3;
+        } finally {
+            p.unmake();
+        }
+        return Math.max(-60, Math.min(120, s));
+    }
+
+    /** Ход m сразу ведёт к ничьей (пат, повтор, 50 ходов, нехватка материала). */
+    static boolean drawAfter(Pos p, int m) {
+        p.make(m);
+        try {
+            String o = p.over();
+            return o.startsWith("Пат") || o.startsWith("Ничья");
+        } finally {
+            p.unmake();
+        }
+    }
+
     /**
      * Модель «живого» соперника. p стоит в позиции ПОСЛЕ хода кандидата m (ходит соперник).
      * Вес ответа = exp((h − hmax)/T) × множитель «очевидности»: взятия, перезахват, шахи и уход

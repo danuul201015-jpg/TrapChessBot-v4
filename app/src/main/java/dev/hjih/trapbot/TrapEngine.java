@@ -135,7 +135,12 @@ final class TrapEngine {
 
     // ================= запрос =================
     /** banList — ходы {ff, fr, tf, tr}, которые нельзя играть (не получились на экране). */
-    synchronized Result handle(String fen, int depth, long ms, int cun, boolean adapt, int[][] banList) {
+    Result handle(String fen, int depth, long ms, int cun, boolean adapt, int[][] banList) {
+        return handle(fen, depth, ms, cun, 0, adapt, banList);
+    }
+
+    /** cun — хитрость (ловушки, вилки, связки), agg — агрессия (атака, инициатива, игра на победу). Шкалы независимы. */
+    synchronized Result handle(String fen, int depth, long ms, int cun, int agg, boolean adapt, int[][] banList) {
         Result res = new Result();
         cur = null;
         try {
@@ -183,7 +188,7 @@ final class TrapEngine {
             for (Pos w : workers) w.nodes = 0;
             main.nodes = 0;
             String[] info = new String[1];
-            int m = think(Math.max(1, depth), Math.max(100, ms), cun, info);
+            int m = think(Math.max(1, depth), Math.max(100, ms), cun, agg, info);
             if (m == 0) { res.none = true; res.over = "Нет ходов"; return res; }
             boolean legal = false;
             int[] lg = main.legalMoves();
@@ -270,7 +275,7 @@ final class TrapEngine {
     }
 
     /** Возвращает ход (0 — нет ходов); текст пояснения кладёт в info[0]. */
-    private int think(int D, long tlMs, int cun, String[] info) {
+    private int think(int D, long tlMs, int cun, int agg, String[] info) {
         final long t0 = System.nanoTime(), tl = tlMs * 1_000_000L;
         final int sp0 = main.sp;
         int[] all = main.legalMoves();
@@ -326,14 +331,20 @@ final class TrapEngine {
         c1.stop = true;
         for (Future<?> f : hf) { try { f.get(); } catch (Exception ignored) { } }
         final String base = "глубина " + done + ", узлов " + nodesStr(allNodes()) + ", потоков " + threads + ", оценка " + (bs > 0 ? "+" : "") + bs;
-        if (done < 3 || Math.abs(bs) > Pos.MATE - 100 || cun <= 0) {
+        if (done < 3 || Math.abs(bs) > Pos.MATE - 100 || (cun <= 0 && agg <= 0)) {
             info[0] = "Лучший ход " + nm.get(best) + " (" + base + ")";
             return best;
         }
 
         // ---------- фаза 2: кандидаты на одной глубине ----------
         final double af = adaptOn ? .5 + (1 - skill) : 1;
-        final int margin = (int) Math.round((bs < -150 ? 150 : bs > 300 ? 15 : 45) * cun / 100.0 * af);
+        // Два независимых бюджета жертвы. Хитрость оправдывает жертву только проверенной ловушкой/тактикой,
+        // агрессия — только реальным давлением на короля. Друг друга они не расширяют.
+        final double sitC = bs < -150 ? 1.8 : bs > 300 ? .25 : 1;
+        final double sitA = bs < -150 ? 1.6 : bs > 300 ? .5 : 1;
+        final int cunB = cun > 0 ? (int) Math.round(110 * sitC * cun / 150.0 * af) : 0;
+        final int aggB = agg > 0 ? (int) Math.round(80 * sitA * agg / 150.0) : 0;
+        final int margin = cunB + aggB;
         final int cd = Math.max(2, done - 1);
         final int floor = bs - margin - 25;
         final Pos.Ctl c2 = new Pos.Ctl();
@@ -363,7 +374,21 @@ final class TrapEngine {
         });
         boolean hasBest = false;
         for (int[] x : cl) if (x[1] == best) hasBest = true;
-        while (cl.size() > 12) cl.remove(cl.size() - 1);
+        if (cl.size() > 12) {
+            // 6 лучших по оценке + до 6 «форсирующих» (шах, взятие) из остальных — жертвы не должны отсеиваться по оценке
+            Pos fp = workers[0];
+            fp.copyFrom(main);
+            List<int[]> keep = new ArrayList<>(cl.subList(0, 6));
+            for (int i = 6; i < cl.size() && keep.size() < 12; i++) {
+                int mv = cl.get(i)[1], to = (mv >> 7) & 127;
+                boolean forcing = main.b[to] != 0 || ((mv >> 17) & 1) != 0;
+                if (!forcing) { fp.make(mv); forcing = fp.inCheck(); fp.unmake(); }
+                if (forcing) keep.add(cl.get(i));
+            }
+            cl = keep;
+        }
+        hasBest = false;
+        for (int[] x : cl) if (x[1] == best) hasBest = true;
         if (!hasBest) cl.add(new int[]{bs, best});
         if (cl.size() < 2) {
             info[0] = "Единственный разумный ход " + nm.get(best) + " (" + base + ")";
@@ -460,19 +485,34 @@ final class TrapEngine {
             }
             if (mm[i] > mmMax) mmMax = mm[i];
         }
-        double kappa = Math.min(.85, cun / 190.0) * (adaptOn ? .6 + .8 * (1 - skill) : 1);
+        double kappa = cun > 0 ? Math.min(.85, cun / 190.0) * (adaptOn ? .6 + .8 * (1 - skill) : 1) : 0;
         kappa = Math.min(.9, kappa);
-        double bscale = Math.min(1.6, cun / 150.0);
-        int bi = -1, pi = -1;
-        double bf = -1e18;
+        double bscale = cun > 0 ? Math.min(1.6, cun / 150.0) : 0;
+        double ascale = agg > 0 ? Math.min(1.6, agg / 120.0) : 0;
+        int pi = -1;
+        double bf = -1e18, sacLoss = 0;
+        int[] atk = new int[nc];
         Tactics.Bonus[] tb = new Tactics.Bonus[nc];
         for (int i = 0; i < nc; i++) {
-            if (mm[i] < mmMax - margin) continue;
+            double loss = mmMax - mm[i];
+            if (loss > margin) continue;
             sp.copyFrom(main);
-            tb[i] = Tactics.eval(sp, cm[i]);
-            double f = (1 - kappa) * mm[i] + kappa * ev[i] + bscale * tb[i].total;
-            if (cm[i] == best) bi = i;
-            if (f > bf) { bf = f; pi = i; }
+            tb[i] = cun > 0 ? Tactics.eval(sp, cm[i]) : new Tactics.Bonus();
+            sp.copyFrom(main);
+            atk[i] = agg > 0 ? Tactics.attack(sp, cm[i]) : 0;
+            sp.copyFrom(main);
+            boolean draw = Tactics.drawAfter(sp, cm[i]);
+            double trapX = kappa * (ev[i] - mm[i]) + bscale * tb[i].total;
+            double attX = ascale * atk[i];
+            if (loss > 12) {
+                // настоящая жертва: каждый источник покрывает потерю только в пределах своего бюджета и своего выигрыша
+                double cj = Math.min(cunB, Math.max(0, trapX)), aj = Math.min(aggB, Math.max(0, attX));
+                if (loss > cj + aj) continue;
+            }
+            if (draw && cm[i] != best && bs > -100) continue;      // не сводим выигранное/ровное к ничьей
+            if (draw && agg > 0) attX -= 30 + agg / 2.0;           // агрессия не любит ничью
+            double f = mm[i] + trapX + attX;
+            if (f > bf) { bf = f; pi = i; sacLoss = loss; }
         }
         if (pi < 0) { info[0] = "Лучший ход " + nm.get(best) + " (" + base + ")"; return best; }
         int pm = cm[pi];
@@ -489,11 +529,12 @@ final class TrapEngine {
         if (pm == best) {
             info[0] = "Лучший ход " + nm.get(best) + " совпал с ловушкой"
                     + (perr[pi] >= .1 ? ": шанс ошибки соперника ~" + Math.round(perr[pi] * 100) + "%" : "")
-                    + (tb[pi].tags.isEmpty() ? "" : ", " + tb[pi].tags) + tail;
+                    + (tb[pi].tags.isEmpty() ? "" : ", " + tb[pi].tags) + (atk[pi] > 0 ? ", атака +" + atk[pi] : "") + tail;
         } else {
             info[0] = "Ловушка: " + nm.get(pm) + " вместо " + nm.get(best) + ". Шанс ошибки соперника ~" + Math.round(perr[pi] * 100)
                     + "% (гарантия " + fmt(mm[pi]) + ", ожидание " + fmt(ev[pi]) + ")"
-                    + (tb[pi].tags.isEmpty() ? "" : ", " + tb[pi].tags) + " (допуск " + margin + ")" + tail;
+                    + (tb[pi].tags.isEmpty() ? "" : ", " + tb[pi].tags) + (atk[pi] > 0 ? ", атака +" + atk[pi] : "")
+                    + (sacLoss > 12 ? ", жертва " + Math.round(sacLoss) : "") + " (бюджет: хитрость " + cunB + ", агрессия " + aggB + ")" + tail;
         }
         return pm;
     }

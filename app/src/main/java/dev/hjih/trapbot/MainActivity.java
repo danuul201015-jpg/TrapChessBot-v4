@@ -25,8 +25,8 @@ import android.text.InputType;
 
 public class MainActivity extends Activity {
     private EditText depth, time, threadsEt;
-    private SeekBar cun, balpha;
-    private TextView cunTxt, balphaTxt, status;
+    private SeekBar cun, agg, balpha;
+    private TextView cunTxt, aggTxt, balphaTxt, status;
     private RadioButton rw, rb;
     private CheckBox adapt, drag;
 
@@ -105,6 +105,19 @@ public class MainActivity extends Activity {
         });
         ll.addView(cun);
 
+        aggTxt = tv("", 15, true);
+        ll.addView(aggTxt);
+        agg = new SeekBar(this);
+        agg.setMax(300);
+        agg.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar s, int p, boolean u) { aggTxt.setText("Агрессия: " + p); }
+            @Override public void onStartTrackingTouch(SeekBar s) { }
+            @Override public void onStopTrackingTouch(SeekBar s) { }
+        });
+        ll.addView(agg);
+        ll.addView(tv("Хитрость — ловушки, вилки, связки. Агрессия — атака на короля, инициатива, игра на победу. "
+                + "Шкалы независимы; жертва допускается, только если оправдана ловушкой или атакой.", 13, false));
+
         adapt = new CheckBox(this); adapt.setText("Адаптация под мою игру");
         drag = new CheckBox(this); drag.setText("Ходить перетаскиванием (вместо двух нажатий)");
         ll.addView(adapt);
@@ -135,6 +148,8 @@ public class MainActivity extends Activity {
         threadsEt.setText(String.valueOf(Prefs.threads(this)));
         cun.setProgress(Prefs.cun(this));
         cunTxt.setText("Хитрость: " + Prefs.cun(this));
+        agg.setProgress(Prefs.agg(this));
+        aggTxt.setText("Агрессия: " + Prefs.agg(this));
         adapt.setChecked(Prefs.adapt(this));
         drag.setChecked(Prefs.drag(this));
         balpha.setProgress(Prefs.btnAlpha(this));
@@ -172,7 +187,7 @@ public class MainActivity extends Activity {
         th = Math.max(0, Math.min(16, th));
         threadsEt.setText(String.valueOf(th));
         Prefs.sp(this).edit()
-                .putInt("threads", th).putInt("depth", d).putString("timeText", t).putInt("cun", cun.getProgress())
+                .putInt("threads", th).putInt("depth", d).putString("timeText", t).putInt("cun", cun.getProgress()).putInt("agg", agg.getProgress())
                 .putBoolean("white", rw.isChecked()).putBoolean("adapt", adapt.isChecked())
                 .putBoolean("drag", drag.isChecked()).putInt("balpha", balpha.getProgress()).apply();
         depth.setText(String.valueOf(d));

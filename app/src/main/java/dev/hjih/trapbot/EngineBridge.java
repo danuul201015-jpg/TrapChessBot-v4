@@ -57,7 +57,7 @@ final class EngineBridge {
         try { Process.setThreadPriority(fallback); } catch (Throwable ignored) { }
     }
 
-    void think(final String fen, final int depth, final double sec, final int cun, final boolean adapt,
+    void think(final String fen, final int depth, final double sec, final int cun, final int agg, final boolean adapt,
                JSONArray ban, CB callback) {
         cb = callback;
         final int id = ++seq;
@@ -85,7 +85,7 @@ final class EngineBridge {
             @Override public void run() {
                 TrapEngine.Result r;
                 try {
-                    r = eng.handle(fen, depth, Math.round(sec * 1000), cun, adapt, banList);
+                    r = eng.handle(fen, depth, Math.round(sec * 1000), cun, agg, adapt, banList);
                 } catch (Throwable t) {
                     r = new TrapEngine.Result();
                     r.error = String.valueOf(t);

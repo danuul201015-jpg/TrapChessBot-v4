@@ -53,6 +53,7 @@ final class Prefs {
     /** потоков движка: 0 = авто (все ядра, до 8), иначе 1–16 */
     static int threads(Context c) { return Math.max(0, Math.min(16, sp(c).getInt("threads", 0))); }
     static int cun(Context c) { return sp(c).getInt("cun", 150); }
+    static int agg(Context c) { return Math.max(0, Math.min(300, sp(c).getInt("agg", 100))); }
     static boolean adapt(Context c) { return sp(c).getBoolean("adapt", true); }
     static boolean drag(Context c) { return sp(c).getBoolean("drag", false); }
 

@@ -429,7 +429,7 @@ public class BotService extends AccessibilityService {
             for (int v : bm) a.put(v);
             ban.put(a);
         }
-        eng.think(fen, Prefs.depth(this), Prefs.timeSec(this), Prefs.cun(this), Prefs.adapt(this), ban, new EngineBridge.CB() {
+        eng.think(fen, Prefs.depth(this), Prefs.timeSec(this), Prefs.cun(this), Prefs.agg(this), Prefs.adapt(this), ban, new EngineBridge.CB() {
             @Override public void done(JSONObject o) {
                 if (!running) { busy = false; return; }
                 if (o.has("error")) {
